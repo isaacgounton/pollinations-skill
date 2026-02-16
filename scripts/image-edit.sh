@@ -69,7 +69,7 @@ if [[ -z "$PROMPT" || -z "$SOURCE" ]]; then
   echo "  --negative TEXT    Negative prompt"
   echo "  --output FILE      Output filename"
   echo ""
-  echo "Note: URL sources are faster. Local files are base64-encoded and may be slow for large images."
+  echo "Note: Local files are auto-uploaded to a temp host (0x0.st). URL sources are faster."
   exit 1
 fi
 
@@ -83,68 +83,39 @@ SANITIZED_PROMPT=$(echo "$PROMPT" | sed 's/%/percent/g')
 ENCODED_PROMPT=$(urlencode "$SANITIZED_PROMPT")
 
 if [[ -f "$SOURCE" ]]; then
-  # Local file: use POST with JSON body to avoid URL length limits
-  MIME_TYPE="image/jpeg"
-  case "$SOURCE" in
-    *.png) MIME_TYPE="image/png" ;;
-    *.gif) MIME_TYPE="image/gif" ;;
-    *.webp) MIME_TYPE="image/webp" ;;
-  esac
+  # Local file: upload to temp host to get a URL, then use GET endpoint
+  # (Pollinations image API is GET-only, no POST support)
+  echo "Uploading local file to temporary host..."
+  TEMP_URL=$(curl -s -F "file=@$SOURCE" https://0x0.st)
 
-  BODY_FILE=$(mktemp /tmp/imgedit_body_XXXXXX.json)
-  B64_FILE=$(mktemp /tmp/imgedit_b64_XXXXXX)
-  trap "rm -f '$BODY_FILE' '$B64_FILE'" EXIT
-
-  base64 -w0 "$SOURCE" > "$B64_FILE"
-
-  # Build data URL from file to avoid ARG_MAX
-  DATA_URL_PREFIX="data:$MIME_TYPE;base64,"
-
-  # Build JSON body with image as data URL
-  jq -n -c --rawfile b64data "$B64_FILE" \
-    --arg prefix "$DATA_URL_PREFIX" \
-    --arg model "$MODEL" \
-    --arg prompt "$SANITIZED_PROMPT" \
-    --arg seed "$SEED" \
-    --arg negative "$NEGATIVE" \
-    '{
-      prompt: $prompt,
-      model: $model,
-      image: ($prefix + ($b64data | rtrimstr("\n")))
-    }
-    | if $seed != "" then . + {seed: ($seed | tonumber)} else . end
-    | if $negative != "" then . + {negative_prompt: $negative} else . end
-    ' > "$BODY_FILE"
-
-  echo "Editing image: $PROMPT"
-  echo "Model: $MODEL (local file, using POST)"
-
-  curl -s --max-time 300 \
-    -H "Content-Type: application/json" \
-    ${POLLINATIONS_API_KEY:+-H "Authorization: Bearer $POLLINATIONS_API_KEY"} \
-    -X POST "https://gen.pollinations.ai/image/$ENCODED_PROMPT" \
-    -d @"$BODY_FILE" \
-    -o "$OUTPUT"
-else
-  # URL source: use GET with query params (fast path)
-  PARAMS="model=$MODEL&image=$(urlencode "$SOURCE")"
-
-  if [[ -n "$SEED" ]]; then
-    PARAMS="$PARAMS&seed=$SEED"
-  fi
-  if [[ -n "$NEGATIVE" ]]; then
-    PARAMS="$PARAMS&negative_prompt=$(urlencode "$NEGATIVE")"
+  if [[ -z "$TEMP_URL" || ! "$TEMP_URL" =~ ^https?:// ]]; then
+    echo "Error: Failed to upload local file. Please provide a URL instead."
+    echo "Example: image-edit.sh \"$PROMPT\" --source https://example.com/image.jpg"
+    exit 1
   fi
 
-  URL="https://gen.pollinations.ai/image/$ENCODED_PROMPT?$PARAMS"
-
-  echo "Editing image: $PROMPT"
-  echo "Model: $MODEL"
-
-  curl -s --max-time 300 \
-    ${POLLINATIONS_API_KEY:+-H "Authorization: Bearer $POLLINATIONS_API_KEY"} \
-    -o "$OUTPUT" "$URL"
+  echo "Uploaded: $TEMP_URL"
+  SOURCE="$TEMP_URL"
 fi
+
+# Build GET URL with query params
+PARAMS="model=$MODEL&image=$(urlencode "$SOURCE")"
+
+if [[ -n "$SEED" ]]; then
+  PARAMS="$PARAMS&seed=$SEED"
+fi
+if [[ -n "$NEGATIVE" ]]; then
+  PARAMS="$PARAMS&negative_prompt=$(urlencode "$NEGATIVE")"
+fi
+
+URL="https://gen.pollinations.ai/image/$ENCODED_PROMPT?$PARAMS"
+
+echo "Editing image: $PROMPT"
+echo "Model: $MODEL"
+
+curl -s --max-time 300 \
+  ${POLLINATIONS_API_KEY:+-H "Authorization: Bearer $POLLINATIONS_API_KEY"} \
+  -o "$OUTPUT" "$URL"
 
 # Check if file was created
 if [[ -s "$OUTPUT" ]]; then
