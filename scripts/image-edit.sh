@@ -86,7 +86,7 @@ if [[ -f "$SOURCE" ]]; then
   # Local file: upload to temp host to get a URL, then use GET endpoint
   # (Pollinations image API is GET-only, no POST support)
   echo "Uploading local file to temporary host..."
-  TEMP_URL=$(curl -s -F "file=@$SOURCE" https://0x0.st)
+  TEMP_URL=$(curl -s -F "reqtype=fileupload" -F "time=1h" -F "fileToUpload=@$SOURCE" https://litterbox.catbox.moe/resources/internals/api.php)
 
   if [[ -z "$TEMP_URL" || ! "$TEMP_URL" =~ ^https?:// ]]; then
     echo "Error: Failed to upload local file. Please provide a URL instead."
