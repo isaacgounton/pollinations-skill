@@ -24,22 +24,47 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+fetch_text_models() {
+  local data
+  data=$(curl -s "https://gen.pollinations.ai/v1/models")
+  # Handle both array format and {data: [...]} format
+  echo "$data" | jq -r 'if type == "array" then .[].id else .data[].id end' 2>/dev/null
+}
+
+fetch_image_models() {
+  curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[] | (.id // .name)' 2>/dev/null
+}
+
+fetch_vision_models() {
+  local data
+  data=$(curl -s "https://gen.pollinations.ai/text/models")
+  echo "$data" | jq -r '.[] | select(.input_modalities? // [] | index("image")) | (.id // .name)' 2>/dev/null
+  # Fallback if jq filter returns nothing
+  if [[ -z "$(echo "$data" | jq -r '.[] | select(.input_modalities? // [] | index("image")) | (.id // .name)' 2>/dev/null)" ]]; then
+    echo "gemini"
+    echo "gemini-large"
+    echo "claude"
+    echo "openai"
+  fi
+}
+
 case "$TYPE" in
   text)
     echo "=== Text/Chat Models ==="
-    curl -s "https://gen.pollinations.ai/v1/models" | jq -r '.[].id' 2>/dev/null || \
-    curl -s "https://gen.pollinations.ai/v1/models" | jq -r '.data[].id' 2>/dev/null
+    fetch_text_models
     ;;
   image)
     echo "=== Image Models ==="
-    curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[] | select(.output_modalities? // [] | index("image")) | .id // .name' 2>/dev/null || \
-    curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[].id // .[].name' 2>/dev/null
+    fetch_image_models
     ;;
   video)
     echo "=== Video Models ==="
-    curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[] | select(.output_modalities? // [] | index("video")) | .id // .name' 2>/dev/null || \
-    echo "veo"
-    echo "seedance"
+    curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[] | select(.output_modalities? // [] | index("video")) | (.id // .name)' 2>/dev/null
+    # Fallback
+    if [[ -z "$(curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[] | select(.output_modalities? // [] | index("video")) | (.id // .name)' 2>/dev/null)" ]]; then
+      echo "veo"
+      echo "seedance"
+    fi
     ;;
   audio)
     echo "=== Audio/TTS Models ==="
@@ -47,18 +72,14 @@ case "$TYPE" in
     ;;
   vision)
     echo "=== Vision Models (image analysis) ==="
-    curl -s "https://gen.pollinations.ai/text/models" | jq -r '.[] | select(.input_modalities? // [] | index("image")) | .id // .name' 2>/dev/null || \
-    echo "gemini"
-    echo "gemini-large"
-    echo "claude"
-    echo "openai"
+    fetch_vision_models
     ;;
   all)
     echo "=== Text/Chat Models ==="
-    curl -s "https://gen.pollinations.ai/v1/models" | jq -r '.[].id // .data[].id' 2>/dev/null
+    fetch_text_models
     echo ""
     echo "=== Image Models ==="
-    curl -s "https://gen.pollinations.ai/image/models" | jq -r '.[].id // .[].name' 2>/dev/null
+    fetch_image_models
     echo ""
     echo "=== Video Models ==="
     echo "veo"
@@ -66,6 +87,9 @@ case "$TYPE" in
     echo ""
     echo "=== Audio/TTS ==="
     echo "openai-audio"
+    echo ""
+    echo "=== Vision Models ==="
+    fetch_vision_models
     ;;
   *)
     echo "Usage: models.sh [--type text|image|audio|vision|video|all]"

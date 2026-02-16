@@ -32,74 +32,62 @@ done
 if [[ -z "$AUDIO_INPUT" ]]; then
   echo "Usage: transcribe.sh <audio_file_or_url> [--prompt \"...\"] [--model gemini]"
   echo "Models: gemini, gemini-large, gemini-legacy, openai-audio"
-  echo "Formats: MP3, WAV, FLAC, OGG"
+  echo "Formats: MP3, WAV, FLAC, OGG, M4A"
   exit 1
 fi
 
-# Build message content
+# Temp files for large data
+BODY_FILE=$(mktemp /tmp/transcribe_body_XXXXXX.json)
+B64_FILE=$(mktemp /tmp/transcribe_b64_XXXXXX)
+trap "rm -f '$BODY_FILE' '$B64_FILE'" EXIT
+
+# Determine audio format
+detect_format() {
+  case "$1" in
+    *.wav) echo "wav" ;;
+    *.flac) echo "flac" ;;
+    *.ogg) echo "ogg" ;;
+    *.m4a) echo "m4a" ;;
+    *) echo "mp3" ;;
+  esac
+}
+
 if [[ -f "$AUDIO_INPUT" ]]; then
-  # Local file: detect format and convert to base64
-  FORMAT="mp3"
-  case "$AUDIO_INPUT" in
-    *.wav) FORMAT="wav" ;;
-    *.flac) FORMAT="flac" ;;
-    *.ogg) FORMAT="ogg" ;;
-    *.m4a) FORMAT="m4a" ;;
-  esac
-  BASE64_DATA=$(base64 -w0 "$AUDIO_INPUT")
-  BODY=$(jq -n -c \
-    --arg model "$MODEL" \
-    --arg prompt "$PROMPT" \
-    --arg data "$BASE64_DATA" \
-    --arg format "$FORMAT" \
-    '{
-      model: $model,
-      messages: [{
-        role: "user",
-        content: [
-          {type: "text", text: $prompt},
-          {type: "input_audio", input_audio: {data: $data, format: $format}}
-        ]
-      }]
-    }')
+  FORMAT=$(detect_format "$AUDIO_INPUT")
+  base64 -w0 "$AUDIO_INPUT" > "$B64_FILE"
 else
-  # URL: download first, then encode
-  TEMP_FILE=$(mktemp /tmp/audio_XXXXXX)
+  # URL: download first
   echo "Downloading audio..."
-  curl -s -o "$TEMP_FILE" "$AUDIO_INPUT"
-  FORMAT="mp3"
-  case "$AUDIO_INPUT" in
-    *.wav) FORMAT="wav" ;;
-    *.flac) FORMAT="flac" ;;
-    *.ogg) FORMAT="ogg" ;;
-    *.m4a) FORMAT="m4a" ;;
-  esac
-  BASE64_DATA=$(base64 -w0 "$TEMP_FILE")
-  rm "$TEMP_FILE"
-  BODY=$(jq -n -c \
-    --arg model "$MODEL" \
-    --arg prompt "$PROMPT" \
-    --arg data "$BASE64_DATA" \
-    --arg format "$FORMAT" \
-    '{
-      model: $model,
-      messages: [{
-        role: "user",
-        content: [
-          {type: "text", text: $prompt},
-          {type: "input_audio", input_audio: {data: $data, format: $format}}
-        ]
-      }]
-    }')
+  TEMP_AUDIO=$(mktemp /tmp/audio_dl_XXXXXX)
+  trap "rm -f '$BODY_FILE' '$B64_FILE' '$TEMP_AUDIO'" EXIT
+  curl -s -o "$TEMP_AUDIO" "$AUDIO_INPUT"
+  FORMAT=$(detect_format "$AUDIO_INPUT")
+  base64 -w0 "$TEMP_AUDIO" > "$B64_FILE"
 fi
+
+# Build JSON using jq with file input to avoid shell arg limits
+jq -n -c --rawfile b64data "$B64_FILE" \
+  --arg model "$MODEL" \
+  --arg prompt "$PROMPT" \
+  --arg format "$FORMAT" \
+  '{
+    model: $model,
+    messages: [{
+      role: "user",
+      content: [
+        {type: "text", text: $prompt},
+        {type: "input_audio", input_audio: {data: ($b64data | rtrimstr("\n")), format: $format}}
+      ]
+    }]
+  }' > "$BODY_FILE"
 
 # Make request
 echo "Transcribing audio with $MODEL..."
 
-RESPONSE=$(curl -s -H "Content-Type: application/json" \
+RESPONSE=$(curl -s --max-time 300 -H "Content-Type: application/json" \
   ${POLLINATIONS_API_KEY:+-H "Authorization: Bearer $POLLINATIONS_API_KEY"} \
   -X POST "https://gen.pollinations.ai/v1/chat/completions" \
-  -d "$BODY")
+  -d @"$BODY_FILE")
 
 # Extract result
 RESULT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')

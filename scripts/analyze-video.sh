@@ -36,19 +36,26 @@ if [[ -z "$VIDEO_INPUT" ]]; then
   exit 1
 fi
 
-# Build message content based on input type
+# Build JSON body using temp files to avoid ARG_MAX limits with large base64 data
+BODY_FILE=$(mktemp /tmp/video_body_XXXXXX.json)
+trap "rm -f '$BODY_FILE'" EXIT
+
 if [[ -f "$VIDEO_INPUT" ]]; then
-  # Local file: convert to base64
+  # Local file: encode to base64 and build JSON via temp files
   FORMAT="mp4"
   case "$VIDEO_INPUT" in
     *.mov) FORMAT="mov" ;;
     *.avi) FORMAT="avi" ;;
   esac
-  BASE64_DATA=$(base64 -w0 "$VIDEO_INPUT")
-  BODY=$(jq -n -c \
+
+  BASE64_FILE=$(mktemp /tmp/video_b64_XXXXXX)
+  base64 -w0 "$VIDEO_INPUT" > "$BASE64_FILE"
+  trap "rm -f '$BODY_FILE' '$BASE64_FILE'" EXIT
+
+  # Build JSON using jq with file input to avoid shell arg limits
+  jq -n -c --rawfile b64data "$BASE64_FILE" \
     --arg model "$MODEL" \
     --arg prompt "$PROMPT" \
-    --arg data "$BASE64_DATA" \
     --arg format "$FORMAT" \
     '{
       model: $model,
@@ -56,13 +63,13 @@ if [[ -f "$VIDEO_INPUT" ]]; then
         role: "user",
         content: [
           {type: "text", text: $prompt},
-          {type: "input_video", input_video: {data: $data, format: $format}}
+          {type: "input_video", input_video: {data: ($b64data | rtrimstr("\n")), format: $format}}
         ]
       }]
-    }')
+    }' > "$BODY_FILE"
 else
   # URL input
-  BODY=$(jq -n -c \
+  jq -n -c \
     --arg model "$MODEL" \
     --arg prompt "$PROMPT" \
     --arg url "$VIDEO_INPUT" \
@@ -75,16 +82,16 @@ else
           {type: "video_url", video_url: {url: $url}}
         ]
       }]
-    }')
+    }' > "$BODY_FILE"
 fi
 
-# Make request
+# Make request (longer timeout for video processing)
 echo "Analyzing video with $MODEL..."
 
-RESPONSE=$(curl -s -H "Content-Type: application/json" \
+RESPONSE=$(curl -s --max-time 300 -H "Content-Type: application/json" \
   ${POLLINATIONS_API_KEY:+-H "Authorization: Bearer $POLLINATIONS_API_KEY"} \
   -X POST "https://gen.pollinations.ai/v1/chat/completions" \
-  -d "$BODY")
+  -d @"$BODY_FILE")
 
 # Extract result
 RESULT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
